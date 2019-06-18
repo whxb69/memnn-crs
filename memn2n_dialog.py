@@ -70,7 +70,7 @@ class MemN2NDialog(object):
         # dimensions: (batch_size, candidates_size)
         logits = self._inference(self._profile, self._stories, self._queries)
         cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
-            logits, self._answers, name="cross_entropy")
+            logits = logits, labels = self._answers, name="cross_entropy")
         cross_entropy_sum = tf.reduce_sum(cross_entropy, name="cross_entropy_sum")
 
         # Define loss op
