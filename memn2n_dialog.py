@@ -68,7 +68,7 @@ class MemN2NDialog(object):
               
         # Calculate cross entropy
         # dimensions: (batch_size, candidates_size)
-        logits = self._inference(self._profile, self._stories, self._queries)
+        logits = self._inference1(self._profile, self._stories, self._queries)
         cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
             logits = logits, labels = self._answers, name="cross_entropy")
         cross_entropy_sum = tf.reduce_sum(cross_entropy, name="cross_entropy_sum")
@@ -78,7 +78,12 @@ class MemN2NDialog(object):
 
         # Gradient pipeline
         grads_and_vars = self._opt.compute_gradients(loss_op)
-        grads_and_vars = [(tf.clip_by_norm(g, self._max_grad_norm), v) 
+
+        def clip_fix(g):
+            if g is None:
+                return g
+            return tf.clip_by_norm(g, self._max_grad_norm) 
+        grads_and_vars = [(clip_fix(g), v) 
                             for g,v in grads_and_vars]
         # grads_and_vars = [(add_gradient_noise(g), v) for g,v in grads_and_vars]
         nil_grads_and_vars = []
@@ -87,7 +92,7 @@ class MemN2NDialog(object):
                 nil_grads_and_vars.append((zero_nil_slot(g), v))
             else:
                 nil_grads_and_vars.append((g, v))
-        train_op = self._opt.apply_gradients(nil_grads_and_vars, name="train_op")
+        train_op = self._opt.apply_gradients(grads_and_vars, name="train_op")
 
         # Define predict ops
         predict_op = tf.argmax(logits, 1, name="predict_op")
@@ -127,6 +132,25 @@ class MemN2NDialog(object):
             R = self._init([self._embedding_size, self._embedding_size])
             self.R = tf.Variable(R, name="R")
         self._nil_vars = set([self.A.name,self.W.name])
+    
+    def _inference1(self, profile, stories, queries):
+        with tf.variable_scope(self._name):
+            m_emb = tf.nn.embedding_lookup(self.A, stories)
+            q_emb = tf.nn.embedding_lookup(self.A, queries)
+            q1 = tf.reduce_sum(q_emb, 1)
+            m = tf.reduce_sum(m_emb,2)
+            u_profile = [q1]
+            for count in range(self._hops):
+                q_temp = tf.transpose(tf.expand_dims(u_profile[-1], -1), [0, 2, 1])
+                dotted =  q_temp * m
+                alpha = tf.nn.softmax(dotted)
+                o = tf.matmul(tf.reduce_sum(alpha * m,1),self.R)
+                q2 = u_profile[-1] + o
+                u_profile.append(q2)
+ 
+            candidates_emb = tf.nn.embedding_lookup(self.W, self._candidates)
+            candidates_emb_sum = tf.reduce_sum(candidates_emb, 1)
+            return tf.matmul(q2, tf.transpose(candidates_emb_sum))
         
     def _inference(self, profile, stories, queries):
         """Forward pass through the model"""
@@ -228,8 +252,8 @@ def zero_nil_slot(t, name=None):
     with tf.name_scope(name, "zero_nil_slot", [t]) as name:
         t = tf.convert_to_tensor(t, name="t")
         s = tf.shape(t)[1]
-        z = tf.zeros(tf.pack([1, s]))
-        return tf.concat(0, [z, tf.slice(t, [1, 0], [-1, -1])], name=name)
+        z = tf.zeros(tf.stack([1, s]))
+        return tf.concat(axis = 1,values = [z, tf.slice(t, [1, 0], [1, -1])], name=name)
 
 
 def add_gradient_noise(t, stddev=1e-3, name=None):
