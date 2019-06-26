@@ -68,7 +68,7 @@ class MemN2NDialog(object):
               
         # Calculate cross entropy
         # dimensions: (batch_size, candidates_size)
-        logits = self._inference1(self._profile, self._stories, self._queries)
+        logits = self._inference(self._profile, self._stories, self._queries,self._answers)
         cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
             logits = logits, labels = self._answers, name="cross_entropy")
         cross_entropy_sum = tf.reduce_sum(cross_entropy, name="cross_entropy_sum")
@@ -126,42 +126,72 @@ class MemN2NDialog(object):
         with tf.variable_scope(self._name):
             A = self._init([self._vocab_size, self._embedding_size])
             self.A = tf.Variable(A, name="A")
+            B = self._init([self._candidates_size, self._embedding_size])
+            self.B = tf.Variable(B, name="B")
             self.H = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="H")
             W = self._init([self._vocab_size, self._embedding_size])
             self.W = tf.Variable(W, name="W")
             R = self._init([self._embedding_size, self._embedding_size])
             self.R = tf.Variable(R, name="R")
+            self.H = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="H")
+            P = self._init([self._embedding_size, self._embedding_size*4])
+            self.P = tf.Variable(P, name="P")
         self._nil_vars = set([self.A.name,self.W.name])
     
     def _inference1(self, profile, stories, queries):
         with tf.variable_scope(self._name):
-            m_emb = tf.nn.embedding_lookup(self.A, stories)
+            
             q_emb = tf.nn.embedding_lookup(self.A, queries)
             q1 = tf.reduce_sum(q_emb, 1)
-            m = tf.reduce_sum(m_emb,2)
-            u_profile = [q1]
-            for count in range(self._hops):
-                q_temp = tf.transpose(tf.expand_dims(u_profile[-1], -1), [0, 2, 1])
-                dotted =  q_temp * m
+            u = [q1]
+            for _ in range(self._hops):
+                m_emb = tf.nn.embedding_lookup(self.A, stories)
+                m = tf.reduce_sum(m_emb, 2)
+                # hack to get around no reduce_dot
+                q_temp = tf.transpose(tf.expand_dims(u[-1], -1), [0, 2, 1])
+                dotted = tf.reduce_sum(m * q_temp, 2)
+
+                # Calculate probabilities
                 alpha = tf.nn.softmax(dotted)
-                o = tf.matmul(tf.reduce_sum(alpha * m,1),self.R)
-                q2 = u_profile[-1] + o
-                u_profile.append(q2)
- 
+
+                alpha_temp = tf.transpose(tf.expand_dims(alpha, -1), [0, 2, 1])
+                m_temp = tf.transpose(m, [0, 2, 1])
+                o = tf.reduce_sum(alpha_temp * m_temp, 2)
+
+                q2 = tf.matmul(u[-1], self.H) + o
+                # u_k=u[-1]+tf.matmul(o_k,self.H)
+                # nonlinearity
+                if self._nonlin:
+                    q2 = self._nonlin(q2)
+
+                u.append(q2)
             candidates_emb = tf.nn.embedding_lookup(self.W, self._candidates)
             candidates_emb_sum = tf.reduce_sum(candidates_emb, 1)
             return tf.matmul(q2, tf.transpose(candidates_emb_sum))
         
-    def _inference(self, profile, stories, queries):
+    def _inference(self, profile, stories, queries, answers):
         """Forward pass through the model"""
         with tf.variable_scope(self._name):
             q_emb = tf.nn.embedding_lookup(self.A, queries)  # Queries vector
             
             # Initial states of memory controllers for conversation history and profile attributes
             u_0 = tf.reduce_sum(q_emb, 1)
+            
+            a = tf.nn.embedding_lookup(self.B,answers)
+            # hack to get around no reduce_dot
+            u_temp = tf.transpose(tf.expand_dims(u_0, -1), [0, 2, 1])
+            dota = tf.reduce_sum(a * u_temp, 2)
+
+            # Calculate probabilities
+            probsa = tf.nn.softmax(dota)
+            probsa_temp = tf.transpose(tf.expand_dims(probsa, -1), [0, 2, 1])
+            a_temp = tf.transpose(a)
+
+            pres = tf.reduce_sum(a_temp * probsa_temp,2)
+            
+            u_0 = u_0 + pres
             u = [u_0]
             u_profile = [u_0]
-
             # Iterate over memories for number of hops
             for count in range(self._hops):
                 m_emb = tf.nn.embedding_lookup(self.A, stories)  # Stories vector 
@@ -197,7 +227,7 @@ class MemN2NDialog(object):
                 o_k_profile = tf.reduce_sum(c_temp_profile * probs_temp_profile, 2)
 
                 # Update controller states
-                u_k = tf.matmul(u[-1], self.H) + o_k
+                u_k = tf.matmul(u[-1], self.H) + o_k + pres
                 u_k_profile = tf.matmul(u_profile[-1], self.H) + o_k_profile
                 
                 # Apply nonlinearity
@@ -229,7 +259,7 @@ class MemN2NDialog(object):
         loss, _ = self._sess.run([self.loss_op, self.train_op], feed_dict=feed_dict)
         return loss
 
-    def predict(self, profile, stories, queries):
+    def predict(self, profile, stories, queries, answers):
         """Predicts answers as one-hot encoding.
         Args:
             profiles: Tensor (None, sentence_size)
@@ -239,7 +269,7 @@ class MemN2NDialog(object):
             answers: Tensor (None, vocab_size)
         """
         feed_dict = {self._profile: profile, self._stories: stories, 
-                     self._queries: queries}
+                     self._queries: queries, self._answers: answers}
         return self._sess.run(self.predict_op, feed_dict=feed_dict)
 
 
