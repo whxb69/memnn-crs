@@ -95,7 +95,7 @@ class MemN2NDialog(object):
         
         
         # cross entropy
-        logits = self._inference(self._profile, self._stories, self._queries) # (batch_size, candidates_size)
+        logits = self._inference(self._profile, self._stories, self._queries, self._weights) # (batch_size, candidates_size)
         cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits = logits,labels = self._answers, name="cross_entropy")
         cross_entropy_sum = tf.reduce_sum(cross_entropy, name="cross_entropy_sum")
 
@@ -137,6 +137,7 @@ class MemN2NDialog(object):
         self._stories = tf.placeholder(tf.int32, [None, None, self._sentence_size], name="stories")
         self._queries = tf.placeholder(tf.int32, [None, self._sentence_size], name="queries")
         self._answers = tf.placeholder(tf.int32, [None], name="answers")
+        self._weights = tf.placeholder(tf.int32, [None, 4, 4], name="weights")
 
     def _build_vars(self):
         with tf.variable_scope(self._name):
@@ -146,47 +147,25 @@ class MemN2NDialog(object):
             self.H = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="H")
             W = tf.concat([ nil_word_slot, self._init([self._vocab_size-1, self._embedding_size]) ], axis=0)
             self.W = tf.Variable(W, name="W")
-            # self.W = tf.Variable(self._init([self._vocab_size, self._embedding_size]), name="W")
+            self.W_q_k = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_q_k")
+            self.W_q_q = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_q_q")
+            self.W_q_v = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_q_v")
+            self.W_o = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W")
         self._nil_vars = set([self.A.name,self.W.name])
-
-    # def _inference(self, stories, queries):
-    #     with tf.variable_scope(self._name):
-    #         q_emb = tf.nn.embedding_lookup(self.A, queries)
-    #         u_0 = tf.reduce_sum(q_emb, 1)
-    #         u = [u_0]
-    #         for count in range(self._hops):
-    #             m_emb = tf.nn.embedding_lookup(self.A, stories)
-    #             m = tf.reduce_sum(m_emb, 2)
-    #             # hack to get around no reduce_dot
-    #             u_temp = tf.transpose(tf.expand_dims(u[-1], -1), [0, 2, 1])
-    #             dotted = tf.reduce_sum(m * u_temp, 2)
-
-    #             # Calculate probabilities
-    #             probs = tf.nn.softmax(dotted)
-    #             # probs = tf.Print(probs, [count, tf.shape(probs), probs], summarize=200)
-
-    #             probs_temp = tf.transpose(tf.expand_dims(probs, -1), [0, 2, 1])
-    #             c_temp = tf.transpose(m, [0, 2, 1])
-    #             o_k = tf.reduce_sum(c_temp * probs_temp, 2)
-
-    #             u_k = tf.matmul(u[-1], self.H) + o_k
-    #             # u_k=u[-1]+tf.matmul(o_k,self.H)
-    #             # nonlinearity
-    #             if self._nonlin:
-    #                 u_k = self._nonlin(u_k)
-
-    #             u.append(u_k)
-    #         candidates_emb=tf.nn.embedding_lookup(self.W, self._candidates)
-    #         candidates_emb_sum=tf.reduce_sum(candidates_emb,1)
-    #         return tf.matmul(u_k,tf.transpose(candidates_emb_sum))
-    #         # logits=tf.matmul(u_k, self.W)
-    #         # return tf.transpose(tf.sparse_tensor_dense_matmul(self._candidates,tf.transpose(logits)))
-
-        
-    def _inference(self, profile, stories, queries):
+    
+    def self_attention(self, t):
+        query = tf.matmul(t, self.W_q_q)
+        key = tf.matmul(t, self.W_q_k)
+        value = tf.matmul(t, self.W_q_v)
+        score = tf.matmul(query,tf.transpose(key))/tf.sqrt(tf.cast(self._embedding_size,dtype=tf.float32))
+        attention = tf.nn.softmax(score)
+        return tf.matmul(attention,value)
+    def _inference(self, profile, stories, queries, weight):
         with tf.variable_scope(self._name):
             q_emb = tf.nn.embedding_lookup(self.A, queries)
-            u_0 = tf.reduce_sum(q_emb, 1)
+            
+            u_0 = self.self_attention(tf.reduce_sum(q_emb, 1)
+            u_0 = tf.matmul(tf.concat(qs,axis=1),self.W_o)
             u = [u_0]
             u_profile = [u_0]
             for count in range(self._hops):
@@ -194,8 +173,13 @@ class MemN2NDialog(object):
                 m_emb_profile = tf.nn.embedding_lookup(self.A, profile)
                 
                 m = tf.reduce_sum(m_emb, 2)
+                # m = self.self_attention(tf.reduce_sum(m_emb, 2),'stories')
+                # m_profile = self.self_attention(tf.reduce_sum(m_emb_profile, 2),'profile')
                 m_profile = tf.reduce_sum(m_emb_profile, 2)
-                
+
+                # m_profile = tf.matmul(tf.cast(weight,dtype=tf.float32),m_profile)
+
+
                 # hack to get around no reduce_dot
                 u_temp = tf.transpose(tf.expand_dims(u[-1], -1), [0, 2, 1])
                 u_temp_profile = tf.transpose(tf.expand_dims(u_profile[-1], -1), [0, 2, 1])
@@ -224,8 +208,8 @@ class MemN2NDialog(object):
                 
                 # nonlinearity
                 if self._nonlin:
-                    u_k_nonlin = self._nonlin(u_k)
-                    u_k_profile_nonlin = self._nonlin(u_k_profile)
+                    u_k = self._nonlin(u_k)
+                    u_k_profile = self._nonlin(u_k_profile)
 
                 u.append(u_k)
                 u_profile.append(u_k_profile)
@@ -242,7 +226,7 @@ class MemN2NDialog(object):
             # return tf.transpose(tf.sparse_tensor_dense_matmul(self._candidates,tf.transpose(logits)))
 
 
-    def batch_fit(self, profile, stories, queries, answers):
+    def batch_fit(self, profile, stories, queries, answers, weights):
         """Runs the training algorithm over the passed batch
         Args:
             stories: Tensor (None, memory_size, sentence_size)
@@ -251,11 +235,12 @@ class MemN2NDialog(object):
         Returns:
             loss: floating-point number, the loss computed for the batch
         """
-        feed_dict = {self._profile: profile, self._stories: stories, self._queries: queries, self._answers: answers}
+        feed_dict = {self._profile: profile, self._stories: stories, 
+        self._queries: queries, self._answers: answers, self._weights: weights}
         loss, _ = self._sess.run([self.loss_op, self.train_op], feed_dict=feed_dict)
         return loss
 
-    def predict(self, profile, stories, queries):
+    def predict(self, profile, stories, queries, weights):
         """Predicts answers as one-hot encoding.
         Args:
             stories: Tensor (None, memory_size, sentence_size)
@@ -263,5 +248,6 @@ class MemN2NDialog(object):
         Returns:
             answers: Tensor (None, vocab_size)
         """
-        feed_dict = {self._profile: profile, self._stories: stories, self._queries: queries}
+        feed_dict = {self._profile: profile, self._stories: stories,
+         self._queries: queries, self._weights: weights}
         return self._sess.run(self.predict_op, feed_dict=feed_dict)
