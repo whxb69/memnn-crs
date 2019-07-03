@@ -24,7 +24,7 @@ tf.flags.DEFINE_integer("embedding_size", 20, "Embedding size for embedding matr
 tf.flags.DEFINE_integer("memory_size", 250, "Maximum size of memory.")
 tf.flags.DEFINE_integer("task_id", 1, "task id, 1 <= id <= 5")
 tf.flags.DEFINE_integer("random_state", None, "Random state.")
-tf.flags.DEFINE_string("data_dir", "MemN2N-modified_v2\\personalized-dialog-dataset/small/", "Directory containing bAbI tasks")
+tf.flags.DEFINE_string("data_dir", "personalized-dialog-dataset/small/", "Directory containing bAbI tasks")
 tf.flags.DEFINE_string("model_dir", "model/", "Directory containing memn2n model checkpoints")
 tf.flags.DEFINE_boolean('train', True, 'if True, begin to train')
 tf.flags.DEFINE_boolean('interactive', False, 'if True, interactive')
@@ -134,7 +134,7 @@ class chatBot(object):
                 a = trainA[start:end]
                 cost_t = self.model.batch_fit(p, s, q, a)
                 total_cost += cost_t
-            if t % self.evaluation_interval == 0:
+            if t % 10 == 0:
                 train_preds = self.batch_predict(trainP, trainS, trainQ, n_train)
                 val_preds = self.batch_predict(valP, valS, valQ, n_val)
                 train_acc = metrics.accuracy_score(np.array(train_preds), trainA)
@@ -200,7 +200,7 @@ class chatBot(object):
 
 
 if __name__ == '__main__':
-    for taskid in [4]:
+    for taskid in [3]:
         print("Started Task:", taskid)
         model_dir = "task" + str(taskid) + "_" + FLAGS.model_dir
         if not os.path.exists(model_dir):
@@ -216,5 +216,5 @@ if __name__ == '__main__':
             chatbot.test()
         chatbot.close_session()
         if taskid != 5:
-            print(taskid,'\tĺŽć')
+            print(taskid,'\t完成')
             time.sleep(2)
