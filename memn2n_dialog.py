@@ -85,6 +85,7 @@ class MemN2NDialog(object):
         self._opt = optimizer
         self._name = name
         self._candidates=candidates_vec
+        self.h = 8
 
         self._build_inputs()
         self._build_vars()
@@ -147,9 +148,9 @@ class MemN2NDialog(object):
             self.H = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="H")
             W = tf.concat([ nil_word_slot, self._init([self._vocab_size-1, self._embedding_size]) ], axis=0)
             self.W = tf.Variable(W, name="W")
-            self.W_q_k = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_q_k")
-            self.W_q_q = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_q_q")
-            self.W_q_v = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_q_v")
+            self.W_q_k = tf.Variable(self._init([self._embedding_size, 10]), name="W_q_k")
+            self.W_q_q = tf.Variable(self._init([self._embedding_size, 10]), name="W_q_q")
+            self.W_q_v = tf.Variable(self._init([self._embedding_size, 10]), name="W_q_v")
             self.W_o = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W")
         self._nil_vars = set([self.A.name,self.W.name])
     
@@ -160,12 +161,21 @@ class MemN2NDialog(object):
         score = tf.matmul(query,tf.transpose(key))/tf.sqrt(tf.cast(self._embedding_size,dtype=tf.float32))
         attention = tf.nn.softmax(score)
         return tf.matmul(attention,value)
+
     def _inference(self, profile, stories, queries, weight):
         with tf.variable_scope(self._name):
             q_emb = tf.nn.embedding_lookup(self.A, queries)
-            
-            u_0 = self.self_attention(tf.reduce_sum(q_emb, 1)
-            u_0 = tf.matmul(tf.concat(qs,axis=1),self.W_o)
+            qs = []
+            for _ in range(self.h):
+                qs.append(self.self_attention(tf.reduce_sum(q_emb, 1)))
+            s = tf.concat(qs,axis=1)
+
+            qs_p = []
+            for _ in range(self.h):
+                qs_p.append(self.self_attention(s))
+            s_p = tf.concat(qs_p,axis=1)
+            s_p = s + tf.nn.dropout(s_p,0.2)
+            u_0 = tf.matmul(s_p,self.W_o)
             u = [u_0]
             u_profile = [u_0]
             for count in range(self._hops):
