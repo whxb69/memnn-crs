@@ -12,6 +12,7 @@ import numpy as np
 import os
 import pickle
 import time
+import datalook
 
 tf.flags.DEFINE_float("learning_rate", 0.001, "Learning rate for Adam Optimizer.")
 tf.flags.DEFINE_float("epsilon", 1e-8, "Epsilon value for Adam Optimizer.")
@@ -19,8 +20,8 @@ tf.flags.DEFINE_float("max_grad_norm", 40.0, "Clip gradients to this norm.")
 tf.flags.DEFINE_integer("evaluation_interval", 10, "Evaluate and print results every x epochs")
 tf.flags.DEFINE_integer("batch_size", 32, "Batch size for training.")
 tf.flags.DEFINE_integer("hops", 3, "Number of hops in the Memory Network.")
-tf.flags.DEFINE_integer("epochs", 250, "Number of epochs to train for.")
-tf.flags.DEFINE_integer("embedding_size", 20, "Embedding size for embedding matrices.")
+tf.flags.DEFINE_integer("epochs", 100, "Number of epochs to train for.")
+tf.flags.DEFINE_integer("embedding_size", 60, "Embedding size for embedding matrices.")
 tf.flags.DEFINE_integer("memory_size", 250, "Maximum size of memory.")
 tf.flags.DEFINE_integer("task_id", 1, "task id, 1 <= id <= 5")
 tf.flags.DEFINE_integer("random_state", None, "Random state.")
@@ -36,7 +37,7 @@ FLAGS = tf.flags.FLAGS
 class chatBot(object):
     def __init__(self, data_dir, model_dir, task_id, isInteractive=True, OOV=False, memory_size=250, random_state=None,
                  batch_size=32, learning_rate=0.001, epsilon=1e-8, max_grad_norm=40.0, evaluation_interval=10, hops=3,
-                 epochs=200, embedding_size=20, save_vocab=False, load_vocab=False):
+                 epochs=250, embedding_size=60, save_vocab=False, load_vocab=False):
         self.data_dir = data_dir
         self.task_id = task_id
         self.model_dir = model_dir
@@ -123,6 +124,9 @@ class chatBot(object):
         batches = [(start, end) for start, end in batches]
         best_validation_accuracy = 0
 
+        Taccs = []
+        Vaccs = []
+        W = [np.diag([0.01,0.01,0.17,0.81])]*len(trainA)
         for t in range(1, self.epochs + 1):
             print('Epoch', t)
             np.random.shuffle(batches)
@@ -132,7 +136,8 @@ class chatBot(object):
                 s = trainS[start:end]
                 q = trainQ[start:end]
                 a = trainA[start:end]
-                cost_t = self.model.batch_fit(p, s, q, a)
+                w = W[start:end]
+                cost_t = self.model.batch_fit(p, s, q, a, w)
                 total_cost += cost_t
             if t % 10 == 0:
                 train_preds = self.batch_predict(trainP, trainS, trainQ, n_train)
@@ -145,7 +150,8 @@ class chatBot(object):
                 print('Training Accuracy:', train_acc)
                 print('Validation Accuracy:', val_acc)
                 print('-----------------------')
-
+                Taccs.append(train_acc)
+                Vaccs.append(val_acc)
                 # write summary
                 # train_acc_summary = tf.scalar_summary('task_' + str(self.task_id) + '/' + 'train_acc', tf.constant((train_acc), dtype=tf.float32))
                 # val_acc_summary = tf.scalar_summary('task_' + str(self.task_id) + '/' + 'val_acc', tf.constant((val_acc), dtype=tf.float32))
@@ -162,6 +168,9 @@ class chatBot(object):
                 if val_acc > best_validation_accuracy:
                     best_validation_accuracy = val_acc
                     self.saver.save(self.sess, self.model_dir + 'model.ckpt', global_step=t)
+        datalook.figshow(self.task_id, Taccs, Vaccs)
+        
+        
 
     def test(self):
         ckpt = tf.train.get_checkpoint_state(self.model_dir)
@@ -186,12 +195,14 @@ class chatBot(object):
 
     def batch_predict(self, P, S, Q, n):
         preds = []
+        W = [np.diag([0.01,0.01,0.17,0.81])]*len(P)
         for start in range(0, n, self.batch_size):
             end = start + self.batch_size
             p = P[start:end]
             s = S[start:end]
             q = Q[start:end]
-            pred = self.model.predict(p, s, q)
+            w = W[start:end]
+            pred = self.model.predict(p, s, q, w)
             preds += list(pred)
         return preds
 
@@ -212,7 +223,6 @@ if __name__ == '__main__':
         # chatbot.run()
         if FLAGS.train:
             chatbot.train()
-        else:
             chatbot.test()
         chatbot.close_session()
         if taskid != 5:
