@@ -5,6 +5,7 @@ import tensorflow as tf
 import numpy as np
 from six.moves import range
 from datetime import datetime
+import random
 
 
 def zero_nil_slot(t, name=None):
@@ -85,7 +86,7 @@ class MemN2NDialog(object):
         self._opt = optimizer
         self._name = name
         self._candidates=candidates_vec
-        self.h = 8
+        self.h = 6
 
         self._build_inputs()
         self._build_vars()
@@ -99,6 +100,22 @@ class MemN2NDialog(object):
         logits = self._inference(self._profile, self._stories, self._queries, self._weights) # (batch_size, candidates_size)
         cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits = logits,labels = self._answers, name="cross_entropy")
         cross_entropy_sum = tf.reduce_sum(cross_entropy, name="cross_entropy_sum")
+        
+        # neg_logits = []
+        # logits_l = tf.split(logits,batch_size,axis=0)
+        # for logit in logits_l:
+        #     negrand = []
+        #     while len(negrand)<5:
+        #         r = random.randint(1,self._candidates_size)
+        #         if r not in negrand:
+        #             negrand.append(r)
+        #     neg_logits.append(tf.stack([logit[0][i] for i in negrand]))
+        # neg_logits = tf.stack(neg_logits)        
+        # w = tf.get_variable("w", [1,1], regularizer=tf.contrib.layers.l2_regularizer(0.001))
+        # b = tf.get_variable("b", [1], regularizer=tf.contrib.layers.l2_regularizer(0.001))
+        # pos_s = tf.log_sigmoid(tf.cast(self._answers,dtype=tf.float32)*w + b)
+        # neg_s = tf.log_sigmoid(-(neg_logits*w) - b)
+        # neg_loss = - pos_s - neg_s
 
         # loss op
         loss_op = cross_entropy_sum
@@ -128,7 +145,6 @@ class MemN2NDialog(object):
         
         self.graph_output = self.loss_op
 
-        # init_op = tf.initialize_all_variables()
         init_op = tf.global_variables_initializer()
         self._sess = session
         self._sess.run(init_op)
@@ -144,52 +160,152 @@ class MemN2NDialog(object):
         with tf.variable_scope(self._name):
             nil_word_slot = tf.zeros([1, self._embedding_size])
             A = tf.concat([ nil_word_slot, self._init([self._vocab_size-1, self._embedding_size]) ], axis=0)
-            self.A = tf.Variable(A, name="A")
+            self.B = tf.Variable(A, name="A")
+            B = tf.concat([ nil_word_slot, self._init([self._vocab_size-1, self._embedding_size]) ], axis=0)
+            self.C = tf.Variable(A, name="B")
+            C = tf.concat([ nil_word_slot, self._init([self._vocab_size-1, self._embedding_size]) ], axis=0)
+            self.A = tf.Variable(A, name="C")
             self.H = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="H")
             W = tf.concat([ nil_word_slot, self._init([self._vocab_size-1, self._embedding_size]) ], axis=0)
             self.W = tf.Variable(W, name="W")
-            self.W_q_k = tf.Variable(self._init([self._embedding_size, 10]), name="W_q_k")
-            self.W_q_q = tf.Variable(self._init([self._embedding_size, 10]), name="W_q_q")
-            self.W_q_v = tf.Variable(self._init([self._embedding_size, 10]), name="W_q_v")
             self.W_o = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W")
+            self.W_k1 = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_k1")
+            self.W_k2 = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_k2")
+            self.W_k = tf.Variable(self._init([2*self._embedding_size, self._embedding_size]), name="W_k")
         self._nil_vars = set([self.A.name,self.W.name])
     
-    def self_attention(self, t):
-        query = tf.matmul(t, self.W_q_q)
-        key = tf.matmul(t, self.W_q_k)
-        value = tf.matmul(t, self.W_q_v)
-        score = tf.matmul(query,tf.transpose(key))/tf.sqrt(tf.cast(self._embedding_size,dtype=tf.float32))
+    def normalize(self, inputs, epsilon = 1e-8, scope="ln", reuse=None):
+        '''Applies layer normalization.
+        Args:
+        inputs: A tensor with 2 or more dimensions, where the first dimension has
+            `batch_size`.
+        epsilon: A floating number. A very small number for preventing ZeroDivision Error.
+        scope: Optional scope for `variable_scope`.
+        reuse: Boolean, whether to reuse the weights of a previous layer
+            by the same name.
+        
+        Returns:
+        A tensor with the same shape and data dtype as `inputs`.
+        '''
+        
+        inputs_shape = inputs.get_shape()
+        params_shape = inputs_shape[-1:]
+    
+        mean, variance = tf.nn.moments(inputs, [-1], keep_dims=True)
+        beta= tf.Variable(tf.zeros(params_shape))
+        gamma = tf.Variable(tf.ones(params_shape))
+        normalized = (inputs - mean) / ( (variance + epsilon) ** (.5) )
+        outputs = gamma * normalized + beta
+            
+        return outputs
+
+    def self_attention(self, t, T, n):
+        if T == 'queries':
+            exec('self.W_q_q_' + str(n) +'= tf.get_variable(name="W_q_q_'+ str(n) +'",initializer=self._init([self._embedding_size, 10]))')
+            exec('self.W_q_k_' + str(n) +'= tf.get_variable(name="W_q_k_'+ str(n) +'",initializer=self._init([self._embedding_size, 10]))')
+            exec('self.W_q_v_' + str(n) +'= tf.get_variable(name="W_q_v_'+ str(n) +'",initializer=self._init([self._embedding_size, 10]))')
+            t_reshape = tf.reshape(t,[-1, self._embedding_size])
+            query = tf.reshape(tf.matmul(t_reshape, eval('self.W_q_q_'+str(n))),[-1,t.get_shape()[1],10])
+            key = tf.reshape(tf.matmul(t_reshape, eval('self.W_q_k_'+str(n))),[-1,t.get_shape()[1],10])
+            value = tf.reshape(tf.matmul(t_reshape, eval('self.W_q_v_'+str(n))),[-1,t.get_shape()[1],10])
+            score = tf.matmul(query,tf.transpose(key,[0,2,1]))/tf.sqrt(tf.cast(32,dtype=tf.float32))
+        elif T == 'stories':
+            exec('self.W_s_q_' + str(n) +'= tf.get_variable(name="W_s_q_'+str(n)+'",initializer=self._init([self._embedding_size, 10]))')
+            exec('self.W_s_k_' + str(n) +'= tf.get_variable(name="W_s_k_'+str(n)+'",initializer=self._init([self._embedding_size, 10]))')
+            exec('self.W_s_v_' + str(n) +'= tf.get_variable(name="W_s_v_'+str(n)+'",initializer=self._init([self._embedding_size, 10]))')
+            t_reshape = tf.reshape(t,[-1, self._embedding_size])
+            query = tf.reshape(tf.matmul(t_reshape, eval('self.W_s_q_'+str(n))),[-1,tf.shape(t)[1],10])
+            key = tf.reshape(tf.matmul(t_reshape, eval('self.W_s_k_'+str(n))),[-1,tf.shape(t)[1],10])
+            value = tf.reshape(tf.matmul(t_reshape, eval('self.W_s_v_'+str(n))),[-1,tf.shape(t)[1],10])
+            score = tf.matmul(query,tf.transpose(key,[0,2,1]))/tf.sqrt(tf.cast(64,dtype=tf.float32))
+    
+        #对key进行mask
+        key_masks = tf.sign(tf.reduce_sum(tf.abs(t),axis=-1)) # (N, T_k)
+        key_masks = tf.tile(tf.expand_dims(key_masks,1), [1, tf.shape(t)[1], 1]) # (h*N, T_q, T_k)
+        paddings = tf.ones_like(score)*(-2**32+1)
+        score = tf.where(tf.equal(key_masks, 0), paddings, score) # (h*N, T_q, T_k)
         attention = tf.nn.softmax(score)
-        return tf.matmul(attention,value)
+        
+        #对query进行mask
+        query_masks = tf.sign(tf.reduce_sum(tf.abs(t), axis=-1)) # (N, T_q)
+        query_masks = tf.tile(tf.expand_dims(query_masks, -1), [1, 1, tf.shape(t)[1]]) # (h*N, T_q, T_k)
+        attention *= query_masks # broadcasting. (N, T_q, C)
+
+        attention = tf.layers.dropout(attention,0.2)
+        output = tf.matmul(attention,value)
+        return self.normalize(output)
+    
+    def multi_head(self, input, T, h=6):
+        attentions = []
+        for n in range(h):
+            attentions.append(self.self_attention(input, T, n))
+        MH = tf.concat(attentions,axis=2)
+        MH_reshape = tf.reshape(MH,[-1, self._embedding_size])
+        output = tf.matmul(MH_reshape,self.W_o)
+        return tf.reshape(output,[-1,tf.shape(MH)[1],self._embedding_size]) + input
+    
+    def FFN(self,inputs,num_units=[240, 60]):
+        params = {"inputs": inputs, "filters": num_units[0], "kernel_size": 1,
+                  "activation": tf.nn.relu, "use_bias": True}
+        outputs = tf.layers.conv1d(**params)
+        
+        # Readout layer
+        params = {"inputs": outputs, "filters": num_units[1], "kernel_size": 1,
+                  "activation": None, "use_bias": True}
+        outputs = tf.layers.conv1d(**params)
+        
+        # Residual connection
+        outputs += inputs
+        
+        # Normalize
+        outputs = self.normalize(outputs)
+        # Residual connection    
+        return outputs
+
+    def position_encoding(self,inputs,num_units=60,scope="positional_encoding"):
+        inputs_r = tf.reshape(inputs,[-1,21])
+        with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
+            N, T = inputs_r.get_shape().as_list()
+            position_ind = tf.tile(tf.expand_dims(tf.range(T), 0), [tf.shape(inputs)[0], 1])
+
+            # First part of the PE function: sin and cos argument
+            position_enc = np.array([
+                [pos / np.power(10000, 2.*i/num_units) for i in range(num_units)]
+                for pos in range(T)])
+
+            # Second part, apply the cosine to even columns and sin to odds.
+            position_enc[:, 0::2] = np.sin(position_enc[:, 0::2])  # dim 2i
+            position_enc[:, 1::2] = np.cos(position_enc[:, 1::2])  # dim 2i+1
+
+            # Convert to a tensor
+            lookup_table = tf.convert_to_tensor(position_enc)
+            outputs = tf.nn.embedding_lookup(lookup_table, position_ind)
+            outputs = tf.where(tf.equal(inputs, 0), inputs, tf.to_float(outputs))
+            return tf.to_float(outputs)
 
     def _inference(self, profile, stories, queries, weight):
-        with tf.variable_scope(self._name):
-            q_emb = tf.nn.embedding_lookup(self.A, queries)
-            qs = []
-            for _ in range(self.h):
-                qs.append(self.self_attention(tf.reduce_sum(q_emb, 1)))
-            s = tf.concat(qs,axis=1)
-
-            qs_p = []
-            for _ in range(self.h):
-                qs_p.append(self.self_attention(s))
-            s_p = tf.concat(qs_p,axis=1)
-            s_p = s + tf.nn.dropout(s_p,0.2)
-            u_0 = tf.matmul(s_p,self.W_o)
+        with tf.variable_scope(self._name, reuse = tf.AUTO_REUSE):
+            q_emb = tf.nn.embedding_lookup(self.B, queries)
+            q_emb += self.position_encoding(q_emb)
+            u_0 = self.multi_head(q_emb,'queries')
+            u_0 = self.FFN(u_0)
+            u_0 = tf.reduce_sum(u_0, 1)
             u = [u_0]
             u_profile = [u_0]
+            f = []
             for count in range(self._hops):
                 m_emb = tf.nn.embedding_lookup(self.A, stories)
                 m_emb_profile = tf.nn.embedding_lookup(self.A, profile)
                 
-                m = tf.reduce_sum(m_emb, 2)
-                # m = self.self_attention(tf.reduce_sum(m_emb, 2),'stories')
-                # m_profile = self.self_attention(tf.reduce_sum(m_emb_profile, 2),'profile')
+                # m = tf.reduce_sum(m_emb, 2)
+                if count == 0:
+                    m = self.multi_head(tf.reduce_sum(m_emb, 2),'stories')
+                else: 
+                    m = self.multi_head(f[-1],'stories')
+                m = self.FFN(m)
+                f.append(m)
                 m_profile = tf.reduce_sum(m_emb_profile, 2)
-
-                # m_profile = tf.matmul(tf.cast(weight,dtype=tf.float32),m_profile)
-
-
+                
                 # hack to get around no reduce_dot
                 u_temp = tf.transpose(tf.expand_dims(u[-1], -1), [0, 2, 1])
                 u_temp_profile = tf.transpose(tf.expand_dims(u_profile[-1], -1), [0, 2, 1])
@@ -205,8 +321,11 @@ class MemN2NDialog(object):
                 probs_temp = tf.transpose(tf.expand_dims(probs, -1), [0, 2, 1])
                 probs_temp_profile = tf.transpose(tf.expand_dims(probs_profile, -1), [0, 2, 1])
 
-                c_temp = tf.transpose(m, [0, 2, 1])
-                c_temp_profile = tf.transpose(m_profile, [0, 2, 1])
+                m_o = tf.reduce_sum(tf.nn.embedding_lookup(self.C, stories),2)
+                m_profile_o = tf.reduce_sum(tf.nn.embedding_lookup(self.C, profile),2)
+
+                c_temp = tf.transpose(m_o, [0, 2, 1])
+                c_temp_profile = tf.transpose(m_profile_o, [0, 2, 1])
 
                 o_k = tf.reduce_sum(c_temp * probs_temp, 2)
                 o_k_profile = tf.reduce_sum(c_temp_profile * probs_temp_profile, 2)
@@ -227,7 +346,14 @@ class MemN2NDialog(object):
             candidates_emb=tf.nn.embedding_lookup(self.W, self._candidates)
             candidates_emb_sum=tf.reduce_sum(candidates_emb,1)
             
-            u_final = tf.add(u_k, u_k_profile)
+            u_k_k = tf.nn.tanh(tf.matmul(u_k,self.W_k1))
+            u_k_profile_k = tf.nn.tanh(tf.matmul(u_k_profile,self.W_k2))
+            k = tf.nn.sigmoid(tf.matmul(tf.concat([u_k_k,u_k_profile_k],1),self.W_k),name='k')
+            print(k)
+            # ones = tf.ones_like(k)
+
+            # u_final = tf.add(tf.multiply(k,u_k), tf.multiply((ones-k),u_k_profile))
+            u_final = tf.add(u_k,u_k_profile)
             if self._nonlin:
                 u_final = self._nonlin(u_final)
 
