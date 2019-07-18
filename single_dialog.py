@@ -90,9 +90,18 @@ class chatBot(object):
             vocab = sorted(vocab)
 
         self.word_idx = dict((c, i + 1) for i, c in enumerate(vocab))
+        # words = []
+        # for word in self.word_idx:
+        #     words.append(word + '\t' + str(self.word_idx[word]))
+        # words = ('\n').join(words)
+        # fw = open('word2id.txt','w',encoding='utf-8')
+        # fw.write(words)
+        # fw.close()
+
         max_story_size = max(map(len, (s for _, s, _, _ in data)))
         mean_story_size = int(np.mean([len(s) for _, s, _, _ in data]))
         self.sentence_size = max(map(len, chain.from_iterable(s for _, s, _, _ in data)))
+        self.entity_size = 4
         self.candidate_sentence_size = max(map(len, candidates))
         query_size = max(map(len, (q for _, _, q, _ in data)))
         self.memory_size = min(self.memory_size, max_story_size)
@@ -110,10 +119,10 @@ class chatBot(object):
             pickle.dump(vocab, vocab_file)
 
     def train(self):
-        trainP, trainS, trainQ, trainA = vectorize_data(self.trainData, self.word_idx, self.sentence_size,
-                                                        self.batch_size, self.n_cand, self.memory_size)
-        valP, valS, valQ, valA = vectorize_data(self.valData, self.word_idx, self.sentence_size, self.batch_size,
-                                                self.n_cand, self.memory_size)
+        trainP, trainS, trainQ, trainA, trainSE= vectorize_data(self.trainData, self.word_idx, self.sentence_size,
+                                                        self.batch_size, self.n_cand, self.memory_size, self.entity_size)
+        valP, valS, valQ, valA, valSE = vectorize_data(self.valData, self.word_idx, self.sentence_size, self.batch_size,
+                                                self.n_cand, self.memory_size, self.entity_size)
         n_train = len(trainS)
         n_val = len(valS)
         print("Training Size", n_train)
@@ -126,7 +135,7 @@ class chatBot(object):
 
         Taccs = []
         Vaccs = []
-        W = [np.diag([0.01,0.01,0.17,0.81])]*len(trainA)
+        # W = [np.diag([0.01,0.01,0.17,0.81])]*len(trainA)
         for t in range(1, self.epochs + 1):
             print('Epoch', t)
             np.random.shuffle(batches)
@@ -136,12 +145,12 @@ class chatBot(object):
                 s = trainS[start:end]
                 q = trainQ[start:end]
                 a = trainA[start:end]
-                w = W[start:end]
-                cost_t = self.model.batch_fit(p, s, q, a, w)
+                se = trainSE[start:end]
+                cost_t = self.model.batch_fit(p, s, q, a, se)
                 total_cost += cost_t
             if t % 10 == 0:
-                train_preds = self.batch_predict(trainP, trainS, trainQ, n_train)
-                val_preds = self.batch_predict(valP, valS, valQ, n_val)
+                train_preds = self.batch_predict(trainP, trainS, trainQ, trainSE, n_train)
+                val_preds = self.batch_predict(valP, valS, valQ, valSE, n_val)
                 train_acc = metrics.accuracy_score(np.array(train_preds), trainA)
                 val_acc = metrics.accuracy_score(val_preds, valA)
                 print('-----------------------')
@@ -181,11 +190,11 @@ class chatBot(object):
         if self.isInteractive:
             self.interactive()
         else:
-            testP, testS, testQ, testA = vectorize_data(self.testData, self.word_idx, self.sentence_size,
-                                                        self.batch_size, self.n_cand, self.memory_size)
+            testP, testS, testQ, testA, testSE = vectorize_data(self.testData, self.word_idx, self.sentence_size,
+                                                        self.batch_size, self.n_cand, self.memory_size, self.entity_size)
             n_test = len(testS)
             print("Testing Size", n_test)
-            test_preds = self.batch_predict(testP, testS, testQ, n_test)
+            test_preds = self.batch_predict(testP, testS, testQ, testSE, n_test)
             test_acc = metrics.accuracy_score(test_preds, testA)
             print("Testing Accurac", test_acc)
 
@@ -193,25 +202,24 @@ class chatBot(object):
             # for pred in test_preds:
             #    print(pred, self.indx2candid[pred])
 
-    def batch_predict(self, P, S, Q, n):
+    def batch_predict(self, P, S, Q, SE,n):
         preds = []
-        W = [np.diag([0.01,0.01,0.17,0.81])]*len(P)
+        # W = [np.diag([0.01,0.01,0.17,0.81])]*len(P)
         for start in range(0, n, self.batch_size):
             end = start + self.batch_size
             p = P[start:end]
             s = S[start:end]
             q = Q[start:end]
-            w = W[start:end]
-            pred = self.model.predict(p, s, q, w)
+            se = SE[start:end]
+            pred = self.model.predict(p, s, q, se)
             preds += list(pred)
         return preds
 
     def close_session(self):
         self.sess.close()
 
-
 if __name__ == '__main__':
-    for taskid in [3]:
+    for taskid in [4]:
         print("Started Task:", taskid)
         model_dir = "task" + str(taskid) + "_" + FLAGS.model_dir
         if not os.path.exists(model_dir):
