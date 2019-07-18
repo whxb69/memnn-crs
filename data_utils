@@ -4,6 +4,7 @@ import os
 import re
 import numpy as np
 import tensorflow as tf
+from itertools import chain
 
 stop_words=set(["a","an","the"])
 
@@ -132,8 +133,51 @@ def vectorize_candidates(candidates,word_idx,sentence_size):
         C.append([word_idx[w] if w in word_idx else 0 for w in candidate] + [0] * lc)
     return tf.constant(C,shape=shape)
 
+def getid():
+  fd = open('word2id.txt','r')
+  ids = fd.read().split('\n')
+  idx = {}
+  for id in ids[:-1]:
+    word,id = id.split('\t')
+    idx[word] = id
+  return idx
 
-def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, max_memory_size):
+def word2id():
+#   idx = getid()
+    fv = open('entityVector.txt','r')
+    embs = fv.read().split('\n')
+    fv.close()
+    res = []
+    entidx = {}
+    for emb in embs[:-1]:
+        word, vec = emb.split('\t')
+        #   res.append(id + '\t' + vec)
+        entidx[word] = eval(vec)
+
+    return entidx
+
+# def get_entity_size(data):
+#     long_size = 0
+#     entity_idx = word2id()
+#     for _, s, _, _ in data:
+#         for sent in s:
+#             size = 0
+#             for word in sent:
+#                 if word in entity_idx:
+#                     size+=1
+#             long_size=max(long_size,size)
+#     return long_size#max(map(inentidx,chain.from_iterable(s for _, s, _, _ in data)))
+
+# def inentidx(sent):
+#     entity_idx = word2id()
+#     entity_size = 0
+#     for word in sent:
+#         if word in entity_idx:
+#             entity_size += 1
+#     return entity_size
+    
+
+def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, max_memory_size,entity_size):
     """
     Vectorize stories and queries.
 
@@ -148,6 +192,8 @@ def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, m
     S = []
     Q = []
     A = []
+    SE = []
+    entity_idx = word2id()
     data.sort(key=lambda x:len(x[0]),reverse=True)
     for i, (profile, story, query, answer) in enumerate(data):
         if i%batch_size==0:
@@ -156,25 +202,38 @@ def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, m
         for i, sentence in enumerate(profile, 1):
             lp = max(0, sentence_size - len(sentence))
             pp.append([word_idx[w] if w in word_idx else 0 for w in sentence] + [0] * lp)
+         
 
         ss = []
+        sse = []
         for i, sentence in enumerate(story, 1):
             ls = max(0, sentence_size - len(sentence))
             ss.append([word_idx[w] if w in word_idx else 0 for w in sentence] + [0] * ls)
+            entities = [entity_idx[w] for w in sentence if w in entity_idx]
+            le = max(0,4 - len(entities))
+            sse.append(entities + [[0]*60]*le)
 
         # take only the most recent sentences that fit in memory
         ss = ss[::-1][:memory_size][::-1]
+        sse = sse[::-1][:memory_size][::-1]
 
         # pad to memory_size
         lm = max(0, memory_size - len(ss))
         for _ in range(lm):
             ss.append([0] * sentence_size)
+        
+        lm = max(0, memory_size - len(sse))
+        for _ in range(lm):
+            sse.append([[0]*60] * 4)
+
+        # sse = np.concatenate(sse, axis=0) 
 
         lq = max(0, sentence_size - len(query))
         q = [word_idx[w] if w in word_idx else 0 for w in query] + [0] * lq
-
+        
         P.append(np.array(pp))
         S.append(np.array(ss))
+        SE.append(np.array(sse))
         Q.append(np.array(q))
         A.append(np.array(answer))
-    return P, S, Q, A
+    return P, S, Q, A, SE
