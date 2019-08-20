@@ -1,7 +1,7 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
-from data_utils import load_dialog_task, vectorize_data, load_candidates, vectorize_candidates, vectorize_candidates_sparse, tokenize
+from data_utils import load_dialog_task, vectorize_data, load_candidates, vectorize_candidates, vectorize_candidates_sparse, tokenize, set_entity_embs
 from sklearn import metrics
 from memn2n.memn2n_dialog import MemN2NDialog
 from itertools import chain
@@ -13,6 +13,7 @@ import os
 import pickle
 import time
 import datalook
+import random
 
 tf.flags.DEFINE_float("learning_rate", 0.001, "Learning rate for Adam Optimizer.")
 tf.flags.DEFINE_float("epsilon", 1e-8, "Epsilon value for Adam Optimizer.")
@@ -21,7 +22,7 @@ tf.flags.DEFINE_integer("evaluation_interval", 10, "Evaluate and print results e
 tf.flags.DEFINE_integer("batch_size", 32, "Batch size for training.")
 tf.flags.DEFINE_integer("hops", 3, "Number of hops in the Memory Network.")
 tf.flags.DEFINE_integer("epochs", 100, "Number of epochs to train for.")
-tf.flags.DEFINE_integer("embedding_size", 60, "Embedding size for embedding matrices.")
+tf.flags.DEFINE_integer("embedding_size", 40, "Embedding size for embedding matrices.")
 tf.flags.DEFINE_integer("memory_size", 250, "Maximum size of memory.")
 tf.flags.DEFINE_integer("task_id", 1, "task id, 1 <= id <= 5")
 tf.flags.DEFINE_integer("random_state", None, "Random state.")
@@ -37,7 +38,7 @@ FLAGS = tf.flags.FLAGS
 class chatBot(object):
     def __init__(self, data_dir, model_dir, task_id, isInteractive=True, OOV=False, memory_size=250, random_state=None,
                  batch_size=32, learning_rate=0.001, epsilon=1e-8, max_grad_norm=40.0, evaluation_interval=10, hops=3,
-                 epochs=250, embedding_size=60, save_vocab=False, load_vocab=False):
+                 epochs=250, embedding_size=40, save_vocab=False, load_vocab=False):
         self.data_dir = data_dir
         self.task_id = task_id
         self.model_dir = model_dir
@@ -57,6 +58,11 @@ class chatBot(object):
         self.save_vocab = save_vocab
         self.load_vocab = load_vocab
 
+        
+        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.5)
+        
+        # 在创建session的时候把config作为参数传进去
+
         candidates, self.candid2indx = load_candidates(self.data_dir, self.task_id)
         self.n_cand = len(candidates)
         print("Candidate Size", self.n_cand)
@@ -69,7 +75,7 @@ class chatBot(object):
         # self.candidates_vec=vectorize_candidates_sparse(candidates,self.word_idx)
         self.candidates_vec = vectorize_candidates(candidates, self.word_idx, self.candidate_sentence_size)
         optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate, epsilon=self.epsilon)
-        self.sess = tf.Session()
+        self.sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
         self.model = MemN2NDialog(self.batch_size, self.vocab_size, self.n_cand, self.sentence_size,
                                   self.embedding_size, self.candidates_vec, session=self.sess,
                                   hops=self.hops, max_grad_norm=self.max_grad_norm, optimizer=optimizer,
@@ -90,18 +96,36 @@ class chatBot(object):
             vocab = sorted(vocab)
 
         self.word_idx = dict((c, i + 1) for i, c in enumerate(vocab))
+        set_entity_embs(self.word_idx)
         # words = []
         # for word in self.word_idx:
         #     words.append(word + '\t' + str(self.word_idx[word]))
         # words = ('\n').join(words)
-        # fw = open('word2id.txt','w',encoding='utf-8')
-        # fw.write(words)
+        # new = {}
+        # fw = open('entityVector.txt','r',encoding='utf-8')
+        # lines = fw.read().split('\n')
         # fw.close()
+        # for i in range(0,len(self.word_idx)):
+        #     new[str(i)]=str([0]*40)
+        # for line in lines[:-1]:
+        #     word,emb = line.split('\t')
+        #     try:
+        #         new[str(self.word_idx[word])] = emb
+        #     except:
+        #         pass
+        # new = sorted(new.items(),key=lambda x:int(x[0]))
+        # res = []
+        # for n in new:     
+        #     res.append(n[1])
+        # res = ('\n').join(res)  
+        # fn = open('entityVectorNew.txt','w',encoding='utf-8')
+        # fn.write(res)
+        # fn.close()
 
         max_story_size = max(map(len, (s for _, s, _, _ in data)))
         mean_story_size = int(np.mean([len(s) for _, s, _, _ in data]))
         self.sentence_size = max(map(len, chain.from_iterable(s for _, s, _, _ in data)))
-        self.entity_size = 4
+        # self.entity_emb = get_entity_emb()
         self.candidate_sentence_size = max(map(len, candidates))
         query_size = max(map(len, (q for _, _, q, _ in data)))
         self.memory_size = min(self.memory_size, max_story_size)
@@ -119,10 +143,19 @@ class chatBot(object):
             pickle.dump(vocab, vocab_file)
 
     def train(self):
-        trainP, trainS, trainQ, trainA, trainSE= vectorize_data(self.trainData, self.word_idx, self.sentence_size,
-                                                        self.batch_size, self.n_cand, self.memory_size, self.entity_size)
-        valP, valS, valQ, valA, valSE = vectorize_data(self.valData, self.word_idx, self.sentence_size, self.batch_size,
-                                                self.n_cand, self.memory_size, self.entity_size)
+        trainP, trainS, trainQ, trainA= vectorize_data(self.trainData, self.word_idx, self.sentence_size,
+                                                        self.batch_size, self.n_cand, self.memory_size)
+        valP, valS, valQ, valA= vectorize_data(self.valData, self.word_idx, self.sentence_size, self.batch_size,
+                                                self.n_cand, self.memory_size)
+        while len(valA)%self.batch_size!=0:
+            index = random.randint(len(valP)-10,len(valP)-1)
+            for item in [valP, valS, valQ, valA]:
+                item.append(item[index])
+
+        while len(trainA)%self.batch_size!=0:
+            index = random.randint(len(trainP)-10,len(trainP)-1)
+            for item in [trainP, trainS, trainQ, trainA]:
+                item.append(item[index])
         n_train = len(trainS)
         n_val = len(valS)
         print("Training Size", n_train)
@@ -135,6 +168,7 @@ class chatBot(object):
 
         Taccs = []
         Vaccs = []
+        # se = self.entity_emb
         # W = [np.diag([0.01,0.01,0.17,0.81])]*len(trainA)
         for t in range(1, self.epochs + 1):
             print('Epoch', t)
@@ -145,12 +179,11 @@ class chatBot(object):
                 s = trainS[start:end]
                 q = trainQ[start:end]
                 a = trainA[start:end]
-                se = trainSE[start:end]
-                cost_t = self.model.batch_fit(p, s, q, a, se)
+                cost_t = self.model.batch_fit(p, s, q, a)
                 total_cost += cost_t
             if t % 10 == 0:
-                train_preds = self.batch_predict(trainP, trainS, trainQ, trainSE, n_train)
-                val_preds = self.batch_predict(valP, valS, valQ, valSE, n_val)
+                train_preds, train_prob, trans_att = self.batch_predict(trainP, trainS, trainQ, n_train)
+                val_preds, val_prob, val_prob_p = self.batch_predict(valP, valS, valQ, n_val)
                 train_acc = metrics.accuracy_score(np.array(train_preds), trainA)
                 val_acc = metrics.accuracy_score(val_preds, valA)
                 print('-----------------------')
@@ -169,10 +202,26 @@ class chatBot(object):
                                                       tf.constant((train_acc), dtype=tf.float32))
                 val_acc_summary = tf.summary.scalar('task_' + str(self.task_id) + '/' + 'val_acc',
                                                     tf.constant((val_acc), dtype=tf.float32))
+                # val_prob_summary = tf.summary.tensor_summary('task_' + str(self.task_id) + '/' + 'val_prob',
+                #                                     tf.constant((val_prob), dtype=tf.float32))
+                # train_prob_summary = tf.summary.tensor_summary('task_' + str(self.task_id) + '/' + 'train_prob',
+                #                                     tf.constant((train_prob), dtype=tf.float32))
+                # val_prob_p_summary = tf.summary.tensor_summary('task_' + str(self.task_id) + '/' + 'val_prob_p',
+                #                                     tf.constant((val_prob_p), dtype=tf.float32))
+                # train_prob_p_summary = tf.summary.tensor_summary('task_' + str(self.task_id) + '/' + 'train_prob_p',
+                #                                     tf.constant((train_prob_p), dtype=tf.float32))
                 merged_summary = tf.summary.merge([train_acc_summary, val_acc_summary])
+                # merged_prob_summary = tf.summary.merge([train_prob_p_summary, val_prob_summary])
+                # merged_prob_p_summary = tf.summary.merge([train_prob_p_summary, val_prob_p_summary])
                 summary_str = self.sess.run(merged_summary)
+                # summary_prob = self.sess.run(merged_prob_summary)
+                # summary_prob_p = self.sess.run(merged_prob_p_summary)
                 self.summary_writer.add_summary(summary_str, t)
+                # self.summary_writer.add_summary(summary_prob,t)
+                # self.summary_writer.add_summary(summary_prob_p,t)
                 self.summary_writer.flush()
+                datalook.attentionshow(train_prob,str(t))
+                datalook.attentionshow(trans_att,str(t)+'-transformer')
 
                 if val_acc > best_validation_accuracy:
                     best_validation_accuracy = val_acc
@@ -190,11 +239,11 @@ class chatBot(object):
         if self.isInteractive:
             self.interactive()
         else:
-            testP, testS, testQ, testA, testSE = vectorize_data(self.testData, self.word_idx, self.sentence_size,
-                                                        self.batch_size, self.n_cand, self.memory_size, self.entity_size)
+            testP, testS, testQ, testA = vectorize_data(self.testData, self.word_idx, self.sentence_size,
+                                                        self.batch_size, self.n_cand, self.memory_size)
             n_test = len(testS)
             print("Testing Size", n_test)
-            test_preds = self.batch_predict(testP, testS, testQ, testSE, n_test)
+            test_preds = self.batch_predict(testP, testS, testQ, n_test)[0]
             test_acc = metrics.accuracy_score(test_preds, testA)
             print("Testing Accurac", test_acc)
 
@@ -202,24 +251,27 @@ class chatBot(object):
             # for pred in test_preds:
             #    print(pred, self.indx2candid[pred])
 
-    def batch_predict(self, P, S, Q, SE,n):
+    def batch_predict(self, P, S, Q, n):
         preds = []
         # W = [np.diag([0.01,0.01,0.17,0.81])]*len(P)
+        # se = self.entity_emb
         for start in range(0, n, self.batch_size):
             end = start + self.batch_size
+            if end>n:
+                print(end,start-end)
+                os.system("pause")
             p = P[start:end]
             s = S[start:end]
             q = Q[start:end]
-            se = SE[start:end]
-            pred = self.model.predict(p, s, q, se)
+            pred, prob, prob_p = self.model.predict(p, s, q)
             preds += list(pred)
-        return preds
+        return preds, prob, prob_p
 
     def close_session(self):
         self.sess.close()
 
 if __name__ == '__main__':
-    for taskid in [4]:
+    for taskid in [3]:
         print("Started Task:", taskid)
         model_dir = "task" + str(taskid) + "_" + FLAGS.model_dir
         if not os.path.exists(model_dir):
@@ -236,3 +288,5 @@ if __name__ == '__main__':
         if taskid != 5:
             print(taskid,'\t完成')
             time.sleep(2)
+    # time.sleep(10)
+    # os.system('shutdown -s -t ')
