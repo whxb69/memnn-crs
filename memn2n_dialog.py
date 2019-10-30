@@ -50,6 +50,8 @@ class MemN2NDialog(object):
     """End-To-End Memory Network."""
     def __init__(self, batch_size, vocab_size, candidates_size, sentence_size, embedding_size,
         candidates_vec,
+        # candidates_rel,
+        # candidates_item,
         hops=3,
         max_grad_norm=40.0,
         nonlin=None,
@@ -95,6 +97,8 @@ class MemN2NDialog(object):
         # self._opt_e = tf.train.AdamOptimizer(learning_rate=e_learnrate)
         self._name = name
         self._candidates=candidates_vec
+        # self._candidates_rel=candidates_rel
+        # self._candidates_item=candidates_item
         self.h = 4
 
         self.L1_flag = True # 在loss中是否加入L1正则化
@@ -111,7 +115,7 @@ class MemN2NDialog(object):
         self.rel_init = None # 关系向量预训练文件，每一行是一个向量，张量大小和要训练的参数一致，仅在TransR中使用
         self.ent_init = None # 实体向量预训练文件，每一行是一个向量，张量大小和要训练的参数一致，仅在TransR中使用
         self.ues_ctxt = False
-
+        self.rel_num = 12
 
         self._build_inputs()
         self._build_vars()
@@ -119,11 +123,11 @@ class MemN2NDialog(object):
         
         # define summary directory
         timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        self.root_dir = "%s_%s_%s_%s/" % ('task', str(task_id),'summary_output', timestamp)
+        self.root_dir = 'Summary\\'+"%s_%s_%s_%s/" % ('task', str(task_id),'summary_output', timestamp)
         
         
         # cross entropy
-        logits, eloss, prob_p, prob = self._inference(self._profile, self._stories, self._queries, self.pos_h, self.pos_t, self.pos_r, self.neg_h, self.neg_t, self.neg_r) # (batch_size, candidates_size)
+        logits, eloss, prob_p, prob = self._inference(self._profile, self._stories, self._queries, self._relation, self.pos_h, self.pos_t, self.pos_r, self.neg_h, self.neg_t, self.neg_r) # (batch_size, candidates_size)
         cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits = logits,labels = self._answers, name="cross_entropy")
         cross_entropy_sum = tf.reduce_sum(cross_entropy, name="cross_entropy_sum")
         
@@ -135,7 +139,7 @@ class MemN2NDialog(object):
         loss_op_l2 = tf.nn.l2_loss(self.vars_rs[0])
         for var in self.vars_rs[1:]:
             loss_op_l2+=tf.nn.l2_loss(var)
-        loss_op = loss_op + loss_op_l2 * 1e-6
+        loss_op = loss_op + loss_op_l2 * 1e-7
         # gradient pipeline
         grads_and_vars = self._opt.compute_gradients(loss_op) 
         grads_and_vars = [(add_gradient_noise(g), v) for g,v in grads_and_vars]
@@ -167,6 +171,7 @@ class MemN2NDialog(object):
         self.train_op_e = train_op_e
         self.prob_log = prob
         self.prob_p_log = prob_p
+        self.eemb = logits
         # self.k = k
 
 
@@ -180,7 +185,7 @@ class MemN2NDialog(object):
     def _build_inputs(self):
         self._profile = tf.placeholder(tf.int32, [None, None, self._sentence_size], name="profile")
         self._stories = tf.placeholder(tf.int32, [None, None, self._sentence_size], name="stories")
-        
+        self._relation = tf.placeholder(tf.int32, [self.rel_num], name="relation")
         self._queries = tf.placeholder(tf.int32, [None, self._sentence_size], name="queries")
         self._answers = tf.placeholder(tf.int32, [None], name="answers")
 
@@ -191,49 +196,24 @@ class MemN2NDialog(object):
             self.neg_h = tf.placeholder(tf.int32, [None])
             self.neg_t = tf.placeholder(tf.int32, [None])
             self.neg_r = tf.placeholder(tf.int32, [None])
-        
-    def get_entity_emb(self):
-        entity = []
-        f = open('.\entityVectorNew.txt','r',encoding='utf-8')
-        lines = f.read().split('\n')
-        for line in lines:
-            entity.append(eval(line))
-        
-        for k in range(len(entity)):
-            rand = random.random()
-            if rand < 0.05:
-                entity[k] = entity[random.randint(0,len(entity)-1)]
-
-        self._entityemb = tf.cast(entity,dtype=tf.float32,name="entity")
     
     def _build_vars(self):
         with tf.variable_scope(self._name):
             nil_word_slot = tf.zeros([1, self._embedding_size])
             A = tf.concat([ nil_word_slot, self._init([self._vocab_size-1, self._embedding_size]) ], axis=0)
-            C = tf.concat([ nil_word_slot, self._init([self._vocab_size-1, self._embedding_size]) ], axis=0)
             self.A = tf.Variable(A, name="A")
-            self.C = tf.Variable(C, name="C")
     
             self.H = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="H")
-            self.H_e = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="H_e")
+            self.H_p = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="H_p")
         
             W = tf.concat([ nil_word_slot, self._init([self._vocab_size-1, self._embedding_size]) ], axis=0)
-            W_ce = tf.concat([ nil_word_slot, self._init([self._vocab_size-1, self._embedding_size]) ], axis=0)
             self.W = tf.Variable(W, name="W")
-            self.W_ce = tf.Variable(W_ce, name="W_ce")
             self.W_o = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_o")
             self.W_oe = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_oe")
-            
-            self.W_e = tf.Variable(self._init([1, 2]), name="W_e")
-            self.W_1 = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_1")
-            self.W_2 = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="W_2")
-            self.W_k = tf.Variable(self._init([self._embedding_size*2, self._embedding_size]), name="W_k")
 
-            self.D = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="D")
-            self.b_1 = tf.Variable(self._init([1, self._embedding_size]), name="b_1")
-            self.b_2 = tf.Variable(self._init([1, self._embedding_size]), name="b_2")
+            self.P_p = tf.Variable(self._init([self._embedding_size, self.rel_num]), name="P_p")
+            self.P_m = tf.Variable(self._init([self._embedding_size, self.rel_num]), name="P_m")
 
-            
             # nil_word_slot_e = tf.zeros([1, self._embedding_size])
             initializer=tf.contrib.layers.xavier_initializer(uniform=False)
             # ent_embeddings = tf.concat([nil_word_slot_e, initializer([self._vocab_size -1, self._embedding_size])], axis=0)
@@ -242,8 +222,13 @@ class MemN2NDialog(object):
                 self.ent_embeddings = tf.Variable(np.loadtxt(r'kg\w2e.txt'), name="ent_embedding", dtype=tf.float32)            
             else: 
                 # self.ent_embeddings = tf.Variable(np.loadtxt(r'kg\w2e.txt'), name="ent_embedding", dtype=tf.float32)
-                self.ent_embeddings = tf.Variable(tf.concat([nil_word_slot, initializer([self._vocab_size -1, self._embedding_size])], axis=0),name="ent_embedding",dtype = tf.float32)
+                self.ent_embeddings = tf.Variable(np.loadtxt(r'kg\w2e.txt'), name="ent_embedding", dtype=tf.float32)            
+                # self.ent_embeddings = tf.Variable(tf.concat([nil_word_slot, initializer([self._vocab_size -1, self._embedding_size])], axis=0),name="ent_embedding",dtype = tf.float32)
             self.rel_embeddings = tf.Variable(initializer([self.relation_total, self._embedding_size]), name="rel_embedding")
+        
+        self.cand_rel = tf.Variable(np.loadtxt(r'cand_rel.txt'), name="c_rel", dtype=tf.float32)
+        self.cand_item = tf.Variable(np.loadtxt(r'cand_item.txt'), name="c_item", dtype=tf.float32)
+
         self._nil_vars = set([self.A.name,self.W.name])
         self.vars_rs = []
         [self.vars_rs.append(var) for var in [self.A, self.W, self.W_o]]
@@ -333,27 +318,69 @@ class MemN2NDialog(object):
         output = tf.matmul(output,value)
         return [tf.layers.dropout(output,0.2),output_log]
     
-    def multi_head(self, input, T, sign=None, h=4, kv=None):
+    def multi_head(self, inputs, T, sign=None, h=4, kv=None):
         attentions = []
         logs = []
         if kv is None:
             for n in range(h):
-                attentions.append(self.self_attention(input, T, n, h, kv)[0])
-                logs.append(self.self_attention(input, T, n, h, kv)[1])
+                attentions.append(self.self_attention(inputs, T, n, h, kv)[0])
+                logs.append(self.self_attention(inputs, T, n, h, kv)[1])
         else:
             for n in range(h):
-                attentions.append(self.self_attention(input, T, sign+str(n), h, kv)[0])
-                logs.append(self.self_attention(input, T, sign+str(n), h, kv)[1])
+                attentions.append(self.self_attention(inputs, T, sign+str(n), h, kv)[0])
+                logs.append(self.self_attention(inputs, T, sign+str(n), h, kv)[1])
         MH = tf.concat(attentions,axis=2)
         MH_reshape = tf.reshape(MH,[-1, self._embedding_size])
         if kv is None:
             output = tf.matmul(MH_reshape,self.W_o)
         else:
             output = tf.matmul(MH_reshape,self.W_oe)
-        dims = [tf.shape(input)[i] for i in range(tf.shape(input).shape.dims[0].value)]
+        dims = [tf.shape(inputs)[i] for i in range(tf.shape(inputs).shape.dims[0].value)]
         logs = tf.reduce_mean(logs,axis=0)
-        return [tf.reshape(output,dims) + input,logs]
+        out = tf.reshape(output,dims) + inputs
+        return [out,logs]
     
+    def multi_head1(self, inputs, num_heads=4):
+        Q = tf.layers.dense(inputs, num_units, activation=tf.nn.relu) # (N, T_q, C)
+        K = tf.layers.dense(inputs, num_units, activation=tf.nn.relu) # (N, T_k, C)
+        V = tf.layers.dense(inputs, num_units, activation=tf.nn.relu) # (N, T_k, C)
+
+        Q_ = tf.concat(tf.split(Q, num_heads, axis=2), axis=0) # (h*N, T_q, C/h) 
+        K_ = tf.concat(tf.split(K, num_heads, axis=2), axis=0) # (h*N, T_k, C/h) 
+        V_ = tf.concat(tf.split(V, num_heads, axis=2), axis=0) # (h*N, T_k, C/h)
+
+        outputs = tf.matmul(Q_, tf.transpose(K_, [0, 2, 1])) # (h*N, T_q, T_k)
+        # Scale
+        outputs = outputs / (K_.get_shape().as_list()[-1] ** 0.5)
+
+        if keyMask:
+            key_masks = tf.sign(tf.abs(tf.reduce_sum(keys, axis=-1))) # (N, T_k)
+            key_masks = tf.tile(key_masks, [num_heads, 1]) # (h*N, T_k)
+            key_masks = tf.tile(tf.expand_dims(key_masks, 1), [1, tf.shape(queries)[1], 1]) # (h*N, T_q, T_k)
+    
+            paddings = tf.ones_like(outputs)*(-2**32+1)
+            outputs = tf.where(tf.equal(key_masks, 0), paddings, outputs) # (h*N, T_q, T_k)
+        
+        outputs = tf.nn.softmax(outputs) # (h*N, T_q, T_k)
+
+        if queryMask:
+            query_masks = tf.sign(tf.abs(tf.reduce_sum(queries, axis=-1))) # (N, T_q)
+            query_masks = tf.tile(query_masks, [num_heads, 1]) # (h*N, T_q)
+            query_masks = tf.tile(tf.expand_dims(query_masks, -1), [1, 1, tf.shape(keys)[1]]) # (h*N, T_q, T_k)
+            outputs *= query_masks # broadcasting. (N, T_q, C)
+        
+        outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
+        # Weighted sum
+        outputs = tf.matmul(outputs, V_) # ( h*N, T_q, C/h)
+        # Restore shape
+        outputs = tf.concat(tf.split(outputs, num_heads, axis=0), axis=2 ) # (N, T_q, C)
+        # Residual connection
+        outputs += queries
+        # Normalize
+        outputs = normalize(outputs) # (N, T_q, C)
+        return outputs
+
+
     def FFN(self,inputs,num_units=[80, 20]):
         params = {"inputs": inputs, "filters": num_units[0], "kernel_size": 1,
                   "activation": tf.nn.relu, "use_bias": True}
@@ -442,26 +469,13 @@ class MemN2NDialog(object):
         self.rel_matrix = tf.Variable(rel_matrix, name="rel_matrix")
 
         with tf.name_scope('lookup_embeddings'):
-            pos_h_e = tf.reshape(tf.nn.embedding_lookup(self.ent_embeddings, pos_h), [-1, self.sizeE, 1])
-            pos_h_w = tf.reshape(tf.nn.embedding_lookup(self.W, pos_h), [-1, self.sizeE, 1])
-            pos_t_e = tf.reshape(tf.nn.embedding_lookup(self.ent_embeddings, pos_t), [-1, self.sizeE, 1])
-            pos_t_w = tf.reshape(tf.nn.embedding_lookup(self.W, pos_t), [-1, self.sizeE, 1])
-            cc_h = CrossCompressUnit(self._embedding_size)
-            cc_t = CrossCompressUnit(self._embedding_size)
-            
-            for _ in range(2):
-                pos_h_w, pos_h_e = cc_h([pos_h_w,pos_h_e])
-                pos_t_w, pos_t_e = cc_t([pos_t_w,pos_t_e])
-                
-            [self.vars_kge.append(var) for var in cc_h.vars]
-            [self.vars_rs.append(var) for var in cc_h.vars]
-            [self.vars_kge.append(var) for var in cc_t.vars]
-            [self.vars_rs.append(var) for var in cc_t.vars]
+            pos_h_e = tf.reshape(tf.nn.embedding_lookup(self.A, pos_h), [-1, self.sizeE, 1])
+            pos_t_e = tf.reshape(tf.nn.embedding_lookup(self.A, pos_t), [-1, self.sizeE, 1])
 
-            pos_r_e = tf.reshape(tf.nn.embedding_lookup(self.rel_embeddings, pos_r), [-1, self.sizeR])
-            neg_h_e = tf.reshape(tf.nn.embedding_lookup(self.ent_embeddings, neg_h), [-1, self.sizeE, 1])
-            neg_t_e = tf.reshape(tf.nn.embedding_lookup(self.ent_embeddings, neg_t), [-1, self.sizeE, 1])
-            neg_r_e = tf.reshape(tf.nn.embedding_lookup(self.rel_embeddings, neg_r), [-1, self.sizeR])
+            pos_r_e = tf.reshape(tf.nn.embedding_lookup(self.A, pos_r), [-1, self.sizeR])
+            neg_h_e = tf.reshape(tf.nn.embedding_lookup(self.A, neg_h), [-1, self.sizeE, 1])
+            neg_t_e = tf.reshape(tf.nn.embedding_lookup(self.A, neg_t), [-1, self.sizeE, 1])
+            neg_r_e = tf.reshape(tf.nn.embedding_lookup(self.A, neg_r), [-1, self.sizeR])
             pos_matrix = tf.reshape(tf.nn.embedding_lookup(self.rel_matrix, pos_r), [-1, self.sizeR, self.sizeE])
             neg_matrix = tf.reshape(tf.nn.embedding_lookup(self.rel_matrix, neg_r), [-1, self.sizeR, self.sizeE])
 
@@ -480,13 +494,14 @@ class MemN2NDialog(object):
         with tf.name_scope("output"):
             eloss = tf.reduce_sum(tf.maximum(pos - neg + self.margin, 0))# + loss_a
             self.l2_loss_kge = tf.nn.l2_loss(pos_h_e) + tf.nn.l2_loss(pos_t_e) 
-            for var in list(set(self.vars_kge)):
-                self.l2_loss_kge += tf.nn.l2_loss(var)
-            eloss = eloss + self.l2_loss_kge * 1e-6
+            # for var in list(set(self.vars_kge)):
+            #     self.l2_loss_kge += tf.nn.l2_loss(var)
+            # eloss = eloss + self.l2_loss_kge * 1e-7
         
         return eloss, pos
 
-    def _inference(self, profile, stories, queries, pos_h, pos_t, pos_r, neg_h, neg_t, neg_r):
+    def _inference(self, profile, stories, queries, relations,
+        pos_h, pos_t, pos_r, neg_h, neg_t, neg_r):
         with tf.variable_scope(self._name, reuse = tf.AUTO_REUSE):
             q_emb = tf.nn.embedding_lookup(self.A, queries)
             # qe_emb = tf.nn.embedding_lookup(self.ent_embeddings, queries)
@@ -501,15 +516,14 @@ class MemN2NDialog(object):
             #     [self.vars_kge.append(var) for var in cc_q.vars]
 
             q_emb *= self.position_encoding(queries,'query')
-            u_0 = self.multi_head(q_emb,'queries')[0]
+            u_0,trans_att = self.multi_head(q_emb,'queries')
             # u_0 = self.FFN(u_0)
             u_0 = tf.reduce_sum(u_0, 1)
             u = [u_0]
             u_profile = [u_0]
-            f = []
             probs_log = []
             probs_p_log = []
-            for count in range(self._hops):
+            for _ in range(self._hops):
                 m_emb = tf.nn.embedding_lookup(self.A, stories)
                 # me_emb = tf.nn.embedding_lookup(self.ent_embeddings, stories)
                 # if self.ues_ctxt:
@@ -536,30 +550,31 @@ class MemN2NDialog(object):
                 #     [self.vars_rs.append(var) for var in cc_p.vars]
                 #     [self.vars_kge.append(var) for var in cc_p.vars]
                     
-                m_emb_profile *= self.position_encoding(profile, 'profile')
+                # m_emb_profile *= self.position_encoding(profile, 'profile')
                 
-                if count == 0:
-                    m,trans_att = self.multi_head(m_emb,'stories')
-                else: 
-                    m,trans_att = self.multi_head(f[-1],'stories')
+                # if count == 0:
+                #     m,trans_att = self.multi_head(m_emb,'stories')
+                # else: 
+                #     m,trans_att = self.multi_head(f[-1],'stories')
                 # m = self.FFN(m)
-                f.append(m)
-                m = tf.reduce_sum(m, 2)
+                # f.append(m)
+                m = tf.reduce_sum(m_emb, 2)
                 
-                m_profile = self.multi_head(m_emb_profile,'stories')[0]
-                m_profile = tf.reduce_sum(m_profile, 2)
+                # m_profile = self.multi_head(m_emb_profile,'stories')[0]
+                m_profile = tf.reduce_sum(m_emb_profile, 2)
                 
                 # hack to get around no reduce_dot
                 u_temp = tf.transpose(tf.expand_dims(u[-1], -1), [0, 2, 1])
+                
                 u_temp_profile = tf.transpose(tf.expand_dims(u_profile[-1], -1), [0, 2, 1])
                 
                 dotted = tf.reduce_sum(m * u_temp, 2)
                 dotted_profile = tf.reduce_sum(m_profile * u_temp_profile, 2)
 
                 # # Calculate probabilities
-                probs = self.sparsemax(dotted)
-                probs_profile = self.sparsemax(dotted_profile)
-
+                probs = tf.nn.softmax(dotted)
+                probs_profile = tf.nn.softmax(dotted_profile)
+                
                 probs_log.append(probs)
                 probs_p_log.append(probs_profile)
 
@@ -584,7 +599,8 @@ class MemN2NDialog(object):
                 u.append(u_k)
                 u_profile.append(u_k_profile)
 
-            u_final = tf.add(u_k, u_k_profile)     
+            u_ks = tf.reduce_sum(tf.transpose(tf.stack(u_profile),[1,0,2]),1)
+            u_final = tf.add(u_k, u_ks)     
             if self._nonlin:
                 u_final = self._nonlin(u_final)
             
@@ -598,21 +614,53 @@ class MemN2NDialog(object):
                 candidatesec_emb = tf.nn.embedding_lookup(self.ent_embeddings_ctxt, self._candidates)
                 candidates_emb = c_mlp(tf.concat([candidates_emb, candidatese_emb, candidatesec_emb],axis=-1))
             else:
-                cc_c = CrossCompressUnit(self._embedding_size)
-                candidates_emb,_ = cc_c([candidates_emb, candidatese_emb])
-                [self.vars_kge.append(var) for var in cc_c.vars]
-                [self.vars_rs.append(var) for var in cc_c.vars]
+                # cc_c = CrossCompressUnit(self._embedding_size)
+                pass
+                # [self.vars_kge.append(var) for var in cc_c.vars]
+                # [self.vars_rs.append(var) for var in cc_c.vars]
+                # mlp_c = Dense(self._embedding_size*2, self._embedding_size)
+                # candidates_emb = mlp_c(tf.concat([candidates_emb, candidatese_emb],axis=2))
+                # [self.vars_kge.append(var) for var in mlp_c.vars]
+                # [self.vars_rs.append(var) for var in mlp_c.vars]
             
             candidates_emb_sum=tf.reduce_sum(candidates_emb,1)
+            # candidatese_emb_sum=tf.reduce_sum(candidatese_emb,1)
 
-            result = tf.matmul(u_final,tf.transpose(candidates_emb_sum))
+            padd = tf.zeros_like(candidates_emb)
+            candidates_emb_ent = tf.where(tf.equal(candidatese_emb,0), padd, candidates_emb)
+            # candidates_emb_sum_ent=tf.reduce_sum(candidates_emb_ent,1)
+            
+            # cc_c = CrossCompressUnit(self._embedding_size)
+            # candidates_emb_sum,candidatese_emb_sum = cc_c([candidates_emb_sum, candidatese_emb_sum])
+
+            rel_emb = tf.nn.embedding_lookup(self.A,relations)
+            dotted_rel = tf.matmul(u_final,rel_emb,transpose_b=True)
+            rel_weight = tf.nn.softmax(dotted_rel)
+            v_p = tf.nn.relu(tf.matmul(tf.reduce_sum(m_profile,1),self.P_p))
+            v_p = v_p*rel_weight
+            v_m = tf.nn.relu(tf.matmul(tf.reduce_sum(m,1),self.P_m))
+            v_m = v_m*rel_weight
+            # candidates_item_emb = tf.nn.embedding_lookup(self.A,self._candidates_item)
+            cand_item_exp = tf.expand_dims(tf.expand_dims(tf.expand_dims(self.cand_item,1),1),1)
+            find_item = tf.equal(tf.to_float(stories), cand_item_exp)
+            find_item_r = tf.reshape(find_item,[tf.shape(candidates_emb)[0], tf.shape(m_emb)[0], -1])
+            item_res = tf.sign(tf.reduce_sum(tf.to_float(find_item_r),-1))
+
+            bias_p = tf.matmul(v_p, self.cand_rel, transpose_b=True)
+            bias_m = tf.matmul(v_m, self.cand_rel, transpose_b=True)
+            item_res_trans = tf.transpose(item_res)
+            bias_p_final = tf.multiply(bias_p, item_res_trans) 
+            bias_m_final = tf.multiply(bias_m, item_res_trans) 
+
+            result = tf.matmul(u_final, tf.transpose(candidates_emb_sum))
+            final_res = result + bias_p_final + bias_m_final
 
             eloss, _ = self.transr(pos_h, pos_t, pos_r, neg_h, neg_t, neg_r)
-            return result, eloss, trans_att, prob_log
+            return final_res, eloss, trans_att, prob_log
             # logits=tf.matmul(u_k, self.W)
             # return tf.transpose(tf.sparse_tensor_dense_matmul(self._candidates,tf.transpose(logits))),prob_log, trans_att
 
-    def batch_fit(self, epoch, profile, stories, queries, answers, 
+    def batch_fit(self, epoch, profile, stories, queries, answers, relations,
                 pos_h_batch, pos_r_batch, pos_t_batch, neg_h_batch, neg_r_batch, neg_t_batch):
         """Runs the training algorithm over the passed batch
         Args:
@@ -624,15 +672,16 @@ class MemN2NDialog(object):
         """
         feed_dict = {self._profile: profile, self._stories: stories, 
                     self._queries: queries, self._answers: answers,
+                    self._relation: relations,
                     self.pos_h: pos_h_batch, self.pos_t: pos_t_batch,
                     self.pos_r: pos_r_batch, self.neg_h: neg_h_batch,
                     self.neg_t: neg_t_batch, self.neg_r: neg_r_batch}
         
         
         loss, eloss, _ , _= self._sess.run([self.loss_op, self.eloss_op, self.train_op, self.train_op_e], feed_dict=feed_dict)
-        return loss , eloss
+        return loss , eloss, 1
 
-    def predict(self, profile, stories, queries, 
+    def predict(self, profile, stories, queries, relations,
             pos_h_batch, pos_r_batch, pos_t_batch, neg_h_batch, neg_r_batch, neg_t_batch):
         """Predicts answers as one-hot encoding.
         Args:
@@ -642,10 +691,10 @@ class MemN2NDialog(object):
             answers: Tensor (None, vocab_size)
         """
         feed_dict = {self._profile: profile, self._stories: stories,
-                    self._queries: queries, self.pos_h: pos_h_batch, 
-                    self.pos_t: pos_t_batch, self.pos_r: pos_r_batch, 
-                    self.neg_h: neg_h_batch, self.neg_t: neg_t_batch,
-                     self.neg_r: neg_r_batch}
+                    self._queries: queries, self._relation: relations,
+                    self.pos_h: pos_h_batch, self.pos_t: pos_t_batch, 
+                    self.pos_r: pos_r_batch, self.neg_h: neg_h_batch, 
+                    self.neg_t: neg_t_batch, self.neg_r: neg_r_batch}
         return self._sess.run([self.predict_op, self.prob_log, self.prob_p_log], feed_dict=feed_dict)
     
     def add_global_fun(self):
