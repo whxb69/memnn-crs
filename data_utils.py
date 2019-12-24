@@ -236,60 +236,38 @@ def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, m
         A.append(np.array(answer))
     return P, S, Q, A
 
-def set_entity_embs(widx):
+def set_entity_embs(widx,batch_size):
     # new = {}
     # for word in widx:
     #     new[word]=str([0]*40)
-    
+    init = np.random.random((len(widx)+1,batch_size))
     fe = open(r'.//facebook//entity2id.txt','r',encoding='utf-8')
     ents = fe.readlines()
     fe.close()
+    fb = open(r'.//facebook//emb.txt','r',encoding='utf-8')
+    embs = fb.readlines()
+    fb.close()
     res = []
-    for e in ents:
-        ent = e.split('\t')[0]
+    for ent,emb in zip(ents,embs):
+        ent = ent.split('\t')[0]
         try:
             nid = widx[ent]
         except KeyError:
-            nid = len(widx)
-            widx[ent] = len(widx)
-        res.append('%s\t%d'%(ent,nid))
-    res = '\n'.join(res)
-
-    fe = open(r'.//facebook//entity2id.txt','w',encoding='utf-8')
-    fe.write(res)
-    fe.close()
+            # nid = len(widx)
+            # widx[ent] = len(widx)
+            nid = 0
+        emb = emb.strip().split()
+        emb = np.array([float(e) for e in emb])
+        init[nid] = emb
+    
+    np.savetxt(r'.//facebook//pre_train.txt',init[1:],fmt='%.20f')
+    # fb = open(r'.//facebook//pre_train.txt','w',encoding='utf-8')
+    # fb.write(res)
+    # fb.close()
 
     return widx
 
 def set_entity_init(widx):
-    # fe = open(r'.\facebook\entity2id.txt','r',encoding='utf-8')
-    # ents = fe.readlines()
-    # fe.close()
-
-    # fv = open(r'.\facebook\emb.txt','r',encoding='utf-8')
-    # values = fv.readlines()
-    # fv.close()
-
-    # novalue = str([0.0]*20)[1:-1].replace(',',' ')
-
-    # res = ['']*(len(widx)+1)
-    # res[0] = novalue
-
-    # for ent,value in zip(ents,values):
-    #     no = int(ent.split('\t')[1][:-1])
-    #     res[no] = value[:-1]
-    
-    # ress = []
-    # for r in res:
-    #     if r == '':
-    #         ress.append(novalue)
-    #     else:
-    #         ress.append(r)
-    # ress = '\n'.join(ress)
-    # f = open('emb_init.txt', 'w', encoding='utf-8')
-    # f.write(ress)
-    # f.close()
-
     fent = open(r'kg//entity2id.txt','r',encoding='utf-8') 
     entities = fent.readlines()
     fent.close()
@@ -372,14 +350,28 @@ def cand_rels(widx):
     rels = ['R_phone','R_cuisine','R_address','R_location','R_number','R_price',
       'R_rating','R_type','R_speciality','R_social_media','R_parking','R_public_transport']
 
-    fc = open(r'personalized-dialog-dataset\personalized-dialog-candidates.txt','r',encoding='utf-8')
+    fc = open(r'personalized-dialog-dataset//personalized-dialog-candidates.txt','r',encoding='utf-8')
     cands = fc.readlines()
     fc.close()
 
+    fe = open(r'personalized-dialog-dataset//personalized-dialog-kb-all.txt','r',encoding='utf-8')
+    entitys=fe.readlines()
+    fe.close()
+
+    eidx = {}
+    for entity in entitys:
+        entity=entity[2:].replace(' ','\t')
+        s,r,t = [e.strip() for e in entity.split('\t')]
+        if s not in eidx:
+            eidx[s] = {}
+        eidx[s][r]=t
+
     cand_rel = []
+    cand_per = []
     cand_item = []
     for cidx,cand in enumerate(cands):
         cand_rel.append([0,0,0,0,0,0,0,0,0,0,0,0])
+        cand_per.append([0,0,0,0,0,0,0,0,0,0,0,0])
         cand_item.append(0)
         for r_idx,rel in enumerate(rels):
             if rel[1:] in cand:
@@ -395,6 +387,14 @@ def cand_rels(widx):
                     # break
                 else:
                     continue
+        for item in eidx.keys():
+            if item in cand:
+                for index,rel in enumerate(rels):
+                    try:
+                        cand_per[cidx][index] = widx[eidx[item][rel]]
+                    except:
+                        cand_per[cidx][index]=0
+            break
 
     # output1 = tf.constant(cand_rel,dtype=tf.float32)
     output2 = []
@@ -420,4 +420,12 @@ def cand_rels(widx):
             fitem.write(str(item))
     fitem.close()
 
-    return cand_rel,output2
+    fper = open('cand_per.txt','w',encoding='utf-8')
+    for index,per in enumerate(cand_per):
+        if index != len(cand_per)-1:
+            fper.write(str(per)[1:-1].replace(',',' ')+'\n')
+        else:
+            fper.write(str(per)[1:-1].replace(',',' '))
+    fper.close()
+
+    return cand_rel,output2,cand_per
