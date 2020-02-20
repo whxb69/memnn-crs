@@ -80,7 +80,7 @@ def parse_dialogs_per_response(lines,candid_dic):
                 attribs = line.split(' ')
                 for attrib in attribs:
                     r=tokenize(attrib)
-                    r.append('$r')
+                    # r.append('$r')
                     # r.append('#'+str(nid))
                     context_profile.append(r)
             else:
@@ -92,15 +92,15 @@ def parse_dialogs_per_response(lines,candid_dic):
                     # temporal encoding, and utterance/response encoding
                     # data.append((context[:],u[:],candid_dic[' '.join(r)]))
                     data.append((context_profile[:],context[:],u[:],a))
-                    u.append('$u')
+                    # u.append('$u')
                     # u.append('#'+str(nid))
-                    r.append('$r')
+                    # r.append('$r')
                     # r.append('#'+str(nid))
                     context.append(u)
                     context.append(r)
                 else:
                     r=tokenize(line)
-                    r.append('$r')
+                    # r.append('$r')
                     # r.append('#'+str(nid))
                     context.append(r)
         else:
@@ -178,7 +178,7 @@ def word2id():
 #     return entity_size
     
 
-def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, max_memory_size):
+def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, max_memory_size,max_dialog):
     """
     Vectorize stories and queries.
 
@@ -190,7 +190,8 @@ def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, m
     The answer array is returned as a one-hot encoding.
     """
     P = []
-    S = []
+    S1 = []
+    S2 = []
     Q = []
     A = []
     data.sort(key=lambda x:len(x[0]),reverse=True)
@@ -203,22 +204,25 @@ def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, m
             pp.append([word_idx[w] if w in word_idx else 0 for w in sentence] + [0] * lp)
          
 
-        ss = []
+        ss1 = []
+        ss2 = []
+        items = {}
         for i, sentence in enumerate(story, 1):
             ls = max(0, sentence_size - len(sentence))
-            ss.append([word_idx[w] if w in word_idx else 0 for w in sentence] + [0] * ls)
-            # sse.append([entity_idx[w] if w in entity_idx else [0]*60 for w in sentence] + [[0]*60] * ls)
-            # le = max(0,4 - len(entities))
+            if sentence[0][:5] == 'resto':
+                ss1.append([word_idx[w] if w in word_idx else 0 for w in sentence] + [0] * ls)
+            else:
+                ss2.append([word_idx[w] if w in word_idx else 0 for w in sentence] + [0] * ls)
             
 
         # take only the most recent sentences that fit in memory
-        ss = ss[::-1][:memory_size][::-1]
-        # sse = sse[::-1][:memory_size][::-1]
+        ss1 = ss1[::-1][:memory_size][::-1]
+        ss2 = ss2[::-1][:memory_size][::-1]
 
         # pad to memory_size
-        lm = max(0, memory_size - len(ss))
+        lm = max(0, max_dialog - len(ss2))
         for _ in range(lm):
-            ss.append([0] * sentence_size)
+            ss2.append([0] * sentence_size)
         
         # lm = max(0, memory_size - len(sse))
         # for _ in range(lm):
@@ -230,11 +234,48 @@ def vectorize_data(data, word_idx, sentence_size, batch_size, candidates_size, m
         q = [word_idx[w] if w in word_idx else 0 for w in query] + [0] * lq
         
         P.append(np.array(pp))
-        S.append(np.array(ss))
+        S1.append(ss1)
+        S2.append(np.array(ss2))
         # SE.append(np.array(sse))
         Q.append(np.array(q))
         A.append(np.array(answer))
-    return P, S, Q, A
+
+    lm1 = 0
+    for ss in S1:
+        if len(ss) > lm1:
+            lm1 = len(ss)
+    # for ss in S2:
+    #     if len(ss) > lm2:
+    #         lm2 = len(ss)
+    
+    S1_new = []
+    for ss in S1:
+        lm = max(0, lm1 - len(ss))
+        for _ in range(lm):
+            ss.append([0] * sentence_size)
+        S1_new.append(np.array(ss))
+    
+    # S2_new = []
+    # for ss in S2:
+    #     lm = max(0, lm2 - len(ss))
+    #     for _ in range(lm):
+    #         ss.append([0] * sentence_size)
+    #     S2_new.append(np.array(ss))
+        
+
+    return P, S1_new, S2, Q, A
+
+def get_max_dialog(data):
+    maxl = 0
+    for _,s,_,_ in data:
+        num = 0
+        for dia in s:
+            if dia[0][:5] != 'resto':
+                num += 1
+        if num > maxl:
+            maxl = num
+    return maxl
+
 
 def set_entity_embs(widx,batch_size):
     # new = {}
