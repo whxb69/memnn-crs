@@ -616,12 +616,15 @@ class MemN2NDialog(object):
 
             u_final = tf.add(u_k, u_k_profile)
 
-            rel_d = tf.nn.relu(tf.reduce_sum(tf.layers.dense(rels, 1), -1))
+            # dot_r = tf.reduce_sum(tf.matmul(tf.expand_dims(u_final, 1), rels, transpose_b = True),1)
+            # padd = tf.ones_like(dot_r) * (-32)
+            # dot_r = tf.where(tf.equal(tf.reduce_sum(rels,-1),0), padd,dot_r)
+            # prob_r = tf.nn.softmax(dot_r)
             
             dot_v = tf.reduce_sum(tf.matmul(tf.expand_dims(o_k_profile, 1), values, transpose_b = True),1)
-            # dot_v += rel_d
             padd = tf.ones_like(dot_v) * (-32)
             dot_v = tf.where(tf.equal(tf.reduce_sum(values,-1),0), padd,dot_v)
+            # dot_v *= prob_r
             prob_v = tf.expand_dims(tf.nn.softmax(dot_v), -1)
             o_keys = tf.layers.dense(tf.reduce_sum(keys * prob_v, 1), self._embedding_size) * slc_flag
 
@@ -683,12 +686,12 @@ class MemN2NDialog(object):
                 basic = tf.ones_like(flags)*(1-slc_flag)
                 flags = tf.where(tf.equal(basic,0),flags,basic)
 
-                rk = tf.layers.dense(tf.concat([u_k, slc_flag], 1), 1, tf.nn.sigmoid)
+                rk = tf.layers.dense(tf.concat([tf.reduce_sum(history, 1), slc_flag], 1), 1, tf.nn.sigmoid)
                 padd = tf.ones_like(rk)
                 rk = tf.where(tf.equal(slc_flag, 0), padd, rk)
-                # score *= (1-rk) 
-                # final_res = tf.matmul(u_final, tf.transpose(candidates_emb_sum)) * rk +score*flags
-                final_res = tf.matmul(u_final, tf.transpose(candidates_emb_sum))  +score*flags
+                score *= (2-rk)
+                final_res = tf.matmul(u_final, tf.transpose(candidates_emb_sum)) +score*flags
+                # final_res = tf.matmul(u_final, tf.transpose(candidates_emb_sum))  +score*flags
                 
                 
                 sort_res = tf.nn.top_k(final_res,tf.shape(final_res)[1]).indices
@@ -699,7 +702,7 @@ class MemN2NDialog(object):
                 res = tf.where(tf.equal(tf.reduce_sum(slc_flag,1),0),result,result_s)
                 
 
-            return final_res, eloss, res, rel_d, o_keys
+            return final_res, eloss, res, o_keys, o_keys
             # logits=tf.matmul(u_k, self.W)
             # return tf.transpose(tf.sparse_tensor_dense_matmul(self._candidates,tf.transpose(logits))),prob_log, trans_att
     def gelu(self, input_tensor):
